@@ -16,10 +16,13 @@ DISCOURSE_DOMAIN = config["domain"]
 API_KEY = config["api_key"]
 API_USERNAME = config["api_username"]
 TOPIC_QUERY_ID = config["topics_query_id"]
+USER_QUERY_ID = config["users_query_id"]
 POST_QUERY_ID = config["posts_query_id"]
 LIKES_QUERY_ID = config["likes_query_id"]
 
-sqlite_conn = SQLite3::Database.new("dump.db")
+d = DateTime.now
+d = d.strftime("%Y%m%d_%H%M%S")
+sqlite_conn = SQLite3::Database.new("xjtu-men-public-dump_#{d}.db")
 conn = MiniSql::Connection.get(sqlite_conn)
 
 def run_report(query_id:, min_id: 0, limit:)
@@ -51,38 +54,56 @@ def create_schema(conn)
   conn.exec <<~SQL
     CREATE TABLE IF NOT EXISTS topics (
       id INTEGER PRIMARY KEY,
-      category,
-      title,
-      created_at,
-      user_id,
-      tags
+      category_name TEXT,
+      category_id INTEGER,
+      title TEXT,
+      excerpt TEXT,
+      created_at TEXT,
+      last_posted_at TEXT,
+      updated_at TEXT,
+      views INTEGER,
+      posts_count INTEGER,
+      like_count INTEGER,
+      user_id INTEGER,
+      last_post_user_id INTEGER,
+      tags TEXT
     )
   SQL
 
   conn.exec <<~SQL
     CREATE TABLE IF NOT EXISTS users(
       id INTEGER PRIMARY KEY,
-      username,
-      name
+      username TEXT,
+      name TEXT,
+      admin INTEGER,
+      moderator INTEGER,
+      trust_level INTEGER
     )
   SQL
 
   conn.exec <<~SQL
     CREATE TABLE IF NOT EXISTS posts(
       id INTEGER PRIMARY KEY,
-      raw,
-      post_number,
-      topic_id,
-      user_id,
-      created_at
+      raw TEXT,
+      cooked TEXT,
+      post_number INTEGER,
+      topic_id INTEGER,
+      user_id INTEGER,
+      created_at TEXT,
+      updated_at TEXT,
+      reply_to_post_number INTEGER,
+      reply_to_user_id INTEGER,
+      reply_count INTEGER,
+      like_count INTEGER,
+      word_count INTEGER
     )
   SQL
 
   conn.exec <<~SQL
     CREATE TABLE IF NOT EXISTS likes(
-      post_id,
-      user_id,
-      created_at
+      post_id INTEGER,
+      user_id INTEGER,
+      created_at TEXT
     )
   SQL
 
@@ -95,7 +116,35 @@ def create_schema(conn)
   )
 end
 
-def load_posts(conn, rows)
+def insert_users(conn, rows)
+  highest_id = 0
+  users_loaded = 0
+
+  conn.exec "BEGIN TRANSACTION"
+
+  rows.each do |row|
+    conn.exec <<~SQL, *row
+    INSERT OR IGNORE INTO users (
+      id,
+      username,
+      name,
+      admin,
+      moderator,
+      trust_level
+    )
+    VALUES (?, ?, ?, ?, ?, ?)
+  SQL
+    users_loaded += 1
+    highest_id = row[0] if row[0] > highest_id
+  end
+
+  conn.exec "COMMIT TRANSACTION"
+
+  { highest_id: highest_id, users_loaded: users_loaded }
+end
+
+
+def insert_posts(conn, rows)
   highest_id = 0
   posts_loaded = 0
 
@@ -103,8 +152,22 @@ def load_posts(conn, rows)
 
   rows.each do |row|
     conn.exec <<~SQL, *row
-    INSERT OR IGNORE INTO posts (id, raw, post_number, topic_id, user_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO posts (
+      id,
+      raw,
+      cooked,
+      post_number,
+      topic_id,
+      user_id,
+      created_at,
+      updated_at,
+      reply_to_post_number,
+      reply_to_user_id,
+      reply_count,
+      like_count,
+      word_count
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   SQL
     posts_loaded += 1
     highest_id = row[0] if row[0] > highest_id
@@ -115,7 +178,7 @@ def load_posts(conn, rows)
   { highest_id: highest_id, posts_loaded: posts_loaded }
 end
 
-def load_topics(conn, rows)
+def insert_topics(conn, rows)
   highest_id = 0
   topics_loaded = 0
 
@@ -123,8 +186,23 @@ def load_topics(conn, rows)
 
   rows.each do |row|
     conn.exec <<~SQL, *row
-    INSERT OR IGNORE INTO topics (id, category, title, created_at, user_id, tags)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT OR IGNORE INTO topics (
+      id,
+      category_name,
+      category_id,
+      title,
+      excerpt,
+      created_at,
+      last_posted_at,
+      updated_at,
+      views,
+      posts_count,
+      like_count,
+      user_id,
+      last_post_user_id,
+      tags
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   SQL
     topics_loaded += 1
     highest_id = row[0] if row[0] > highest_id
@@ -135,32 +213,8 @@ def load_topics(conn, rows)
   { highest_id: highest_id, topics_loaded: topics_loaded }
 end
 
-def load_users(conn, rows)
-  conn.exec "BEGIN TRANSACTION"
-  loaded = 0
 
-  rows.each do |row|
-    conn.exec <<~SQL, *row
-    INSERT OR IGNORE INTO users(id, username, name)
-    VALUES (?, ?, ?)
-  SQL
-    loaded += 1
-  end
-
-  conn.exec "COMMIT TRANSACTION"
-  loaded
-end
-
-def load_users_from_json(conn, json)
-  users = json.dig("relations", "user")
-  if users
-    users = users.map { |user| [user["id"], user["username"], user["name"]] }
-    loaded = load_users(conn, users)
-    puts "Loaded #{loaded} users"
-  end
-end
-
-def load_likes(conn, json)
+def insert_likes(conn, json)
   result = { highest_id: 0, likes_loaded: 0 }
 
   conn.exec "BEGIN TRANSACTION"
@@ -180,15 +234,28 @@ def load_likes(conn, json)
   result
 end
 
-def download_topics(conn)
+def dl_users(conn)
+  min_id = 0
+  while true
+    response_data =
+      run_report(query_id: USER_QUERY_ID, min_id: min_id, limit: 10_000)
+
+    result = insert_users(conn, response_data["rows"])
+
+    puts "Loaded #{result[:users_loaded]} users (highest id is #{result[:highest_id]})"
+
+    min_id = result[:highest_id]
+    break if result[:users_loaded] == 0
+  end
+end
+
+def dl_topics(conn)
   min_id = 0
   while true
     response_data =
       run_report(query_id: TOPIC_QUERY_ID, min_id: min_id, limit: 10_000)
 
-    load_users_from_json(conn, response_data)
-
-    result = load_topics(conn, response_data["rows"])
+    result = insert_topics(conn, response_data["rows"])
     puts "Loaded #{result[:topics_loaded]} topics (highest id is #{result[:highest_id]})"
 
     min_id = result[:highest_id]
@@ -196,15 +263,13 @@ def download_topics(conn)
   end
 end
 
-def download_posts(conn)
+def dl_posts(conn)
   min_id = 0
   while true
     response_data =
       run_report(query_id: POST_QUERY_ID, min_id: min_id, limit: 10_000)
 
-    load_users_from_json(conn, response_data)
-
-    result = load_posts(conn, response_data["rows"])
+    result = insert_posts(conn, response_data["rows"])
     puts "Loaded #{result[:posts_loaded]} posts (highest id is #{result[:highest_id]})"
 
     min_id = result[:highest_id]
@@ -212,13 +277,13 @@ def download_posts(conn)
   end
 end
 
-def download_likes(conn)
+def dl_likes(conn)
   min_id = 0
   while true
     response_data =
       run_report(query_id: LIKES_QUERY_ID, min_id: min_id, limit: 10_000)
 
-    result = load_likes(conn, response_data)
+    result = insert_likes(conn, response_data)
 
     puts "Loaded #{result[:likes_loaded]} likes (highest id is #{result[:highest_id]})"
 
@@ -228,6 +293,7 @@ def download_likes(conn)
 end
 
 create_schema(conn)
-download_topics(conn)
-download_posts(conn)
-download_likes(conn)
+dl_users(conn)
+dl_topics(conn)
+dl_posts(conn)
+dl_likes(conn)

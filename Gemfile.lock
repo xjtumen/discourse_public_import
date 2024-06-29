@@ -2,7 +2,7 @@ GEM
   remote: https://rubygems.org/
   specs:
     mini_sql (1.4.0)
-    sqlite3 (1.6.2-x86_64-linux)
+    sqlite3 (1.7.3-x86_64-linux)
 
 PLATFORMS
   x86_64-linux

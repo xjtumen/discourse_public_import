@@ -1,3 +1,5 @@
+# todo: port schema from .sql file to table creation and insertion in Ruby
+
 require "sqlite3"
 require "mini_sql"
 

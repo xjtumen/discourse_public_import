@@ -1,8 +1,13 @@
 -- [params]
 -- int :min_id = 0
 
-SELECT id, post_id pid, user_id uid, created_at
+SELECT
+    id,
+    post_id pid,
+    user_id uid,
+    created_at
 FROM post_actions
+-- 2 is the `like` action type
 WHERE post_action_type_id = 2
 AND deleted_at is NULL
 AND id > :min_id
